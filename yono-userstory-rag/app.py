@@ -14,6 +14,9 @@ import base64
 import pdfplumber
 import httpx 
 import tiktoken 
+import re
+from streamlit_mic_recorder import mic_recorder
+
 tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir 
 
@@ -28,6 +31,7 @@ api_key="sk-ngPOpvwa-2hjZ0iQZMpMUw",
 http_client=client
 ) 
 
+
 llm_image = ChatOpenAI(model="azure/genailab-maas-gpt-4o ",
                  base_url="https://genailab.tcs.in",
                  api_key="sk-ngPOpvwa-2hjZ0iQZMpMUw",
@@ -35,6 +39,35 @@ llm_image = ChatOpenAI(model="azure/genailab-maas-gpt-4o ",
                  temperature= 0.7
 )
 
+def text_to_speech_bytes(text: str, voice: str = "alloy") -> bytes:
+    """
+    Convert answer text to spoken audio bytes using OpenAI TTS.
+    """
+    response = client.audio.speech.create(
+        model="gpt-4o-mini-tts",
+        voice=voice,
+        input=text
+    )
+
+def mask_sensitive_data(text: str):
+    patterns = {
+        "EMAIL": r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+',
+        "PHONE": r'\b\d{10}\b',
+        "AADHAAR": r'\b\d{4}\s?\d{4}\s?\d{4}\b',
+        "PAN": r'\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b',
+        "CREDIT_CARD": r'\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b',
+        "ACCOUNT_NUMBER": r'\b\d{9,18}\b'
+    }
+
+    detected = []
+
+    for label, pattern in patterns.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            detected.extend([(label, m) for m in matches])
+            text = re.sub(pattern, f"[REDACTED_{label}]", text)
+
+    return text, detected
 
 def extract_image_with_llm(image):
     import io
@@ -72,7 +105,7 @@ def extract_docx(file):
             image_text = extract_image_with_llm(image)
             content.append("[Image Understanding]")
             content.append(image_text)
-            content.append(text)
+            content.append(extracted_text)
 
     return "\n".join(content)
 
@@ -116,16 +149,33 @@ uploaded_file = st.file_uploader("Upload User Story DOCX or PDF", type=["docx", 
 if uploaded_file:
     with st.spinner("Processing document..."):
         if uploaded_file.name.lower().endswith(".pdf"):
-            text = extract_pdf(uploaded_file)
+            extracted_text = extract_pdf(uploaded_file)
         else:
-            text = extract_docx(uploaded_file)
-        chunks = split_text(text)
+            extracted_text = extract_docx(uploaded_file)
+        clean_text, detected_items = mask_sensitive_data(extracted_text)
+
+        if detected_items:
+            print("Sensitive data found and masked:", detected_items)
+
+        chunks = split_text(clean_text)
+
         vectordb = create_vector_db(chunks)
         qa = create_qa(vectordb)
 
     st.success("Document processed successfully!")
 
     query = st.text_input("Ask your question about user stories")
+
+    if query:
+        clean_query, detected = mask_sensitive_data(query)
+
+        if detected:
+            st.warning("⚠️ Sensitive information detected in your query and has been masked.")
+
+        result = qa.invoke({"query": clean_query})
+
+        st.subheader("Answer")
+        st.write(result["result"])
 
     if query:
         result = qa({"query": query})
